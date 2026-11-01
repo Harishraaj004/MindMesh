@@ -1,0 +1,12 @@
+[
+ {"question":"How much does Halden Sensor turbidity drift each month and why?","gold_docs":["aurora_research_notes.md","vendor_review.md"],"answer_terms":["4 percent","algae"]},
+ {"question":"What does Drift Correction do in the code?","gold_docs":["sensor_calibration.py"],"answer_terms":["drift"]},
+ {"question":"Which site had the highest turbidity in March and what is the suspected cause?","gold_docs":["field_readings.csv","aurora_research_notes.md"],"answer_terms":["Riverside Station","construction"]},
+ {"question":"Could the Riverside Station spike be a sensor fault, and what is being done to check?","gold_docs":["meeting_2026-09.txt","aurora_research_notes.md"],"answer_terms":["upstream sampling"]},
+ {"question":"What does a Brightwater Probe cost and why might the team switch to it?","gold_docs":["vendor_review.md","meeting_2026-09.txt"],"answer_terms":["2,400","wiper"]},
+ {"question":"Who will install a Reference Cell at Cedar Outfall and when?","gold_docs":["meeting_2026-09.txt","sensor_calibration.py"],"answer_terms":["Tomas Reyes","November"]},
+ {"question":"How accurate is Automated Drift Correction compared to weekly calibration?","gold_docs":["meeting_2026-09.txt","aurora_research_notes.md"],"answer_terms":["2.6 percent","2 percent"]},
+ {"question":"Who leads Project Aurora and which sites are monitored?","gold_docs":["aurora_research_notes.md"],"answer_terms":["Priya Nair","Cedar Outfall"]},
+ {"question":"What is the warranty on the Quasar X9 spectrometer?","gold_docs":[],"answerable":false},
+ {"question":"What was the lunar rover landing date in the Aurora programme?","gold_docs":[],"answerable":false}
+]

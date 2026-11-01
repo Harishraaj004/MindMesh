@@ -1,0 +1,9 @@
+Project Aurora meeting, September 2026
+
+Attendees: Priya Nair, Tomas Reyes, Ines Albrecht.
+
+Tomas Reyes reported that Automated Drift Correction held error at 2.6 percent over the summer at Millbrook Weir. Cedar Outfall still lacks a Reference Cell installation.
+
+Ines Albrecht asked whether the March spike at Riverside Station could be a sensor fault rather than runoff. Priya Nair said Halden Sensor drift cannot explain a jump this large, so upstream sampling will be scheduled for October.
+
+Action: Tomas Reyes to install a Reference Cell at Cedar Outfall by November. Action: Ines Albrecht to request a Brightwater Probe quote for Riverside Station.
