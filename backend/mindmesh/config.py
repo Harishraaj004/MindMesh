@@ -18,6 +18,10 @@ ON_VERCEL = bool(os.getenv("VERCEL"))
 DATA_DIR = Path(os.getenv("MINDMESH_DATA_DIR") or ("/tmp/mindmesh" if ON_VERCEL else ROOT / "data" / "store"))
 # Shared password for the whole app (HTTP Basic, any username). Blank = no gate (local use only).
 ACCESS_PASSWORD = os.getenv("MINDMESH_ACCESS_PASSWORD", "")
+# Private, throwaway workspaces: every page load gets its own database schema, dropped when the page is
+# closed/reloaded (or after SESSION_TTL idle seconds). Default on when hosted, off for local use.
+SESSIONS = (os.getenv("MINDMESH_SESSIONS") or ("1" if ON_VERCEL else "0")).lower() in ("1", "true", "yes")
+SESSION_TTL = int(os.getenv("MINDMESH_SESSION_TTL") or "1800")
 UPLOAD_DIR = DATA_DIR / "uploads"
 FRONTEND_DIR = ROOT / "frontend"
 

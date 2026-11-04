@@ -450,7 +450,12 @@ body.l-open .scrim,body.r-open .scrim{display:block;position:fixed;inset:0;backg
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(p,o){const r=await fetch('/api/'+p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j}
+// Private workspace: a new random id per page load, kept only in memory. Reloading or closing the page ends it
+// and the server deletes everything uploaded in it. The id is unguessable, so no one else can read this data.
+const SID=[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join('');
+addEventListener('pagehide',()=>{try{navigator.sendBeacon('/api/session/end?sid='+SID)}catch(e){}});
+addEventListener('pageshow',e=>{if(e.persisted)location.reload()});
+async function api(p,o={}){o={...o,headers:{...(o.headers||{}),'X-Session':SID}};const r=await fetch('/api/'+p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j}
 const post=(p,body)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 
 // ---- icons (inline, stroke-based)
@@ -614,7 +619,7 @@ function showSources(res,hl){
   const rel=relScores(res.sources),cited=new Set(res.cited);
   $('#p-chat').innerHTML=res.sources.map((s,i)=>`<div class="src ${hl===s.id?'hl':''} ${cited.has(s.id)?'':'dim'}" id="src-${s.id}" style="--d:${i*45}ms">
     <div class="sh"><button class="cite">${s.id}</button>${kic(s.kind,1)}<div class="sn"><div class="n" title="${esc(s.doc)}">${esc(s.doc)}</div><div class="s">${esc(s.loc)}</div></div></div>
-    ${s.kind==='image'?`<img class="thumb" alt="" src="/api/documents/${s.doc_id}/annotated" onerror="this.onerror=null;this.src='/api/documents/${s.doc_id}/file'">`:''}
+    ${s.kind==='image'?`<img class="thumb" alt="" src="/api/documents/${s.doc_id}/annotated?sid=${SID}" onerror="this.onerror=null;this.src='/api/documents/${s.doc_id}/file?sid=${SID}'">`:''}
     <pre>${esc(s.text)}</pre>${s.text.length>320?'<button class="more">Show more</button>':''}
     <div class="rel">Relevance<div><i data-w="${Math.round(rel[s.id]*100)}"></i></div></div>
     <div class="tags">${cited.has(s.id)?'<span class="c">cited</span>':''}${(s.via||[]).map(v=>`<span>${esc(v)}</span>`).join('')}</div></div>`).join('');

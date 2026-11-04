@@ -17,40 +17,41 @@ from psycopg.rows import dict_row
 
 EMBED_DIM = 384  # sentence-transformers/all-MiniLM-L6-v2
 
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS documents(
+def schema_sql(p):
+    return f"""
+CREATE TABLE IF NOT EXISTS {p}documents(
   id TEXT PRIMARY KEY, name TEXT, kind TEXT, source TEXT, path TEXT,
   created DOUBLE PRECISION, meta JSONB);
-CREATE TABLE IF NOT EXISTS chunks(
-  id TEXT PRIMARY KEY, doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS {p}chunks(
+  id TEXT PRIMARY KEY, doc_id TEXT NOT NULL REFERENCES {p}documents(id) ON DELETE CASCADE,
   idx INTEGER, text TEXT, modality TEXT, loc TEXT, emb vector({EMBED_DIM}));
-CREATE TABLE IF NOT EXISTS entities(
+CREATE TABLE IF NOT EXISTS {p}entities(
   id SERIAL PRIMARY KEY, key TEXT UNIQUE, name TEXT, type TEXT);
-CREATE TABLE IF NOT EXISTS mentions(
-  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS relations(
-  src INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  dst INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  relation TEXT, chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE);
-CREATE INDEX IF NOT EXISTS ix_chunks_doc ON chunks(doc_id);
-CREATE INDEX IF NOT EXISTS ix_mentions_e ON mentions(entity_id);
-CREATE INDEX IF NOT EXISTS ix_mentions_c ON mentions(chunk_id);
-CREATE INDEX IF NOT EXISTS ix_chunks_emb ON chunks USING hnsw (emb vector_cosine_ops);
+CREATE TABLE IF NOT EXISTS {p}mentions(
+  entity_id INTEGER NOT NULL REFERENCES {p}entities(id) ON DELETE CASCADE,
+  chunk_id TEXT NOT NULL REFERENCES {p}chunks(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS {p}relations(
+  src INTEGER NOT NULL REFERENCES {p}entities(id) ON DELETE CASCADE,
+  dst INTEGER NOT NULL REFERENCES {p}entities(id) ON DELETE CASCADE,
+  relation TEXT, chunk_id TEXT NOT NULL REFERENCES {p}chunks(id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS ix_chunks_doc ON {p}chunks(doc_id);
+CREATE INDEX IF NOT EXISTS ix_mentions_e ON {p}mentions(entity_id);
+CREATE INDEX IF NOT EXISTS ix_mentions_c ON {p}mentions(chunk_id);
+CREATE INDEX IF NOT EXISTS ix_chunks_emb ON {p}chunks USING hnsw (emb vector_cosine_ops);
 """
 
 
 def _connect(url):
     """Connect, creating the target database first if it does not exist yet."""
     try:
-        return psycopg.connect(url, autocommit=True)
+        return psycopg.connect(url, autocommit=True, prepare_threshold=None)
     except psycopg.errors.InvalidCatalogName:
         info = psycopg.conninfo.conninfo_to_dict(url)
         dbname = info.pop("dbname")
         admin = psycopg.connect(**info, dbname="postgres", autocommit=True)
         admin.execute(psycopg.sql.SQL("CREATE DATABASE {}").format(psycopg.sql.Identifier(dbname)))
         admin.close()
-        return psycopg.connect(url, autocommit=True)
+        return psycopg.connect(url, autocommit=True, prepare_threshold=None)
 
 
 class Store:
@@ -64,12 +65,15 @@ class Store:
         self.schema = schema
         self.db = _connect(url)
         self.db.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        if schema:  # isolated schema (used by tests); `public` stays on the path for the vector type
+        # Every table is schema-qualified in each query. No session state (search_path) is used, so this stays
+        # correct behind a transaction-pooling proxy such as Neon's PgBouncer, where connections are shared.
+        self.p = '"' + schema.replace('"', '') + '".' if schema else ""
+        if schema:
             self.db.execute(psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(psycopg.sql.Identifier(schema)))
-            self.db.execute(psycopg.sql.SQL("SET search_path TO {}, public").format(psycopg.sql.Identifier(schema)))
         register_vector(self.db)
         self.db.row_factory = dict_row
-        self.db.execute(SCHEMA)
+        p = self.p
+        self.db.execute(schema_sql(p))
 
     def drop_schema(self):
         if self.schema:
@@ -82,18 +86,18 @@ class Store:
     def add_document(self, name, kind, source="", path="", meta=None):
         doc_id = uuid.uuid4().hex[:12]
         with self.lock:
-            self.db.execute("INSERT INTO documents VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            self.db.execute(f"INSERT INTO {self.p}documents VALUES(%s,%s,%s,%s,%s,%s,%s)",
                             (doc_id, name, kind, source, path, time.time(), json.dumps(meta or {})))
             self.version += 1
         return doc_id
 
     def set_meta(self, doc_id, meta):
         with self.lock:
-            self.db.execute("UPDATE documents SET meta=%s WHERE id=%s", (json.dumps(meta), doc_id))
+            self.db.execute(f"UPDATE {self.p}documents SET meta=%s WHERE id=%s", (json.dumps(meta), doc_id))
 
     def set_path(self, doc_id, path):
         with self.lock:
-            self.db.execute("UPDATE documents SET path=%s WHERE id=%s", (path, doc_id))
+            self.db.execute(f"UPDATE {self.p}documents SET path=%s WHERE id=%s", (path, doc_id))
 
     def add_chunks(self, doc_id, chunks, embeddings):
         """chunks: list of dicts(text, modality, loc). Returns chunk ids."""
@@ -102,7 +106,7 @@ class Store:
             for i, (c, e) in enumerate(zip(chunks, embeddings)):
                 cid = f"{doc_id}-{i}"
                 ids.append(cid)
-                self.db.execute("INSERT INTO chunks VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                self.db.execute(f"INSERT INTO {self.p}chunks VALUES(%s,%s,%s,%s,%s,%s,%s)",
                                 (cid, doc_id, i, c["text"], c.get("modality", "text"), c.get("loc", ""),
                                  np.asarray(e, dtype=np.float32)))
             self.version += 1
@@ -111,17 +115,17 @@ class Store:
     def list_documents(self):
         with self.lock:
             return self.db.execute(
-                "SELECT d.*, (SELECT COUNT(*) FROM chunks c WHERE c.doc_id=d.id)::int AS n_chunks "
-                "FROM documents d ORDER BY created DESC").fetchall()
+                f"SELECT d.*, (SELECT COUNT(*) FROM {self.p}chunks c WHERE c.doc_id=d.id)::int AS n_chunks "
+                f"FROM {self.p}documents d ORDER BY created DESC").fetchall()
 
     def get_document(self, doc_id):
         with self.lock:
-            return self.db.execute("SELECT * FROM documents WHERE id=%s", (doc_id,)).fetchone()
+            return self.db.execute(f"SELECT * FROM {self.p}documents WHERE id=%s", (doc_id,)).fetchone()
 
     def delete_document(self, doc_id):
         with self.lock, self.db.transaction():
-            self.db.execute("DELETE FROM documents WHERE id=%s", (doc_id,))  # cascades to chunks/mentions/relations
-            self.db.execute("DELETE FROM entities WHERE id NOT IN (SELECT entity_id FROM mentions)")
+            self.db.execute(f"DELETE FROM {self.p}documents WHERE id=%s", (doc_id,))  # cascades to chunks/mentions/relations
+            self.db.execute(f"DELETE FROM {self.p}entities WHERE id NOT IN (SELECT entity_id FROM {self.p}mentions)")
             self.version += 1
 
     def all_chunks(self):
@@ -129,7 +133,7 @@ class Store:
         with self.lock:
             return self.db.execute(
                 "SELECT c.id, c.doc_id, c.idx, c.text, c.modality, c.loc, d.name AS doc_name, d.kind "
-                "FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY d.created, c.idx").fetchall()
+                f"FROM {self.p}chunks c JOIN {self.p}documents d ON d.id=c.doc_id ORDER BY d.created, c.idx").fetchall()
 
     def vector_search(self, qvec, k=20):
         """Nearest chunks by cosine similarity, computed by pgvector. Returns [(chunk_id, score)]."""
@@ -137,7 +141,7 @@ class Store:
         if q.shape[0] != EMBED_DIM:
             raise ValueError(f"Query embedding has {q.shape[0]} dims; the database expects {EMBED_DIM}.")
         with self.lock:
-            rows = self.db.execute("SELECT id, 1 - (emb <=> %s) AS score FROM chunks ORDER BY emb <=> %s LIMIT %s",
+            rows = self.db.execute(f"SELECT id, 1 - (emb <=> %s) AS score FROM {self.p}chunks ORDER BY emb <=> %s LIMIT %s",
                                    (q, q, k)).fetchall()
         return [(r["id"], float(r["score"])) for r in rows]
 
@@ -149,19 +153,19 @@ class Store:
             for name, etype in entities:
                 key = name.lower().strip()
                 eid = self.db.execute(
-                    "INSERT INTO entities(key,name,type) VALUES(%s,%s,%s) "
+                    f"INSERT INTO {self.p}entities(key,name,type) VALUES(%s,%s,%s) "
                     "ON CONFLICT (key) DO UPDATE SET key=EXCLUDED.key RETURNING id", (key, name, etype)).fetchone()["id"]
                 ids[key] = eid
-                self.db.execute("INSERT INTO mentions VALUES(%s,%s)", (eid, chunk_id))
+                self.db.execute(f"INSERT INTO {self.p}mentions VALUES(%s,%s)", (eid, chunk_id))
             for s, rel, d in relations:
                 sk, dk = s.lower().strip(), d.lower().strip()
                 if sk in ids and dk in ids:
-                    self.db.execute("INSERT INTO relations VALUES(%s,%s,%s,%s)", (ids[sk], ids[dk], rel, chunk_id))
+                    self.db.execute(f"INSERT INTO {self.p}relations VALUES(%s,%s,%s,%s)", (ids[sk], ids[dk], rel, chunk_id))
             self.version += 1
 
     def graph_rows(self):
         with self.lock:
-            ents = self.db.execute("SELECT id,name,type FROM entities").fetchall()
-            ments = [(r["entity_id"], r["chunk_id"]) for r in self.db.execute("SELECT entity_id, chunk_id FROM mentions")]
-            rels = self.db.execute("SELECT src,dst,relation,chunk_id FROM relations").fetchall()
+            ents = self.db.execute(f"SELECT id,name,type FROM {self.p}entities").fetchall()
+            ments = [(r["entity_id"], r["chunk_id"]) for r in self.db.execute(f"SELECT entity_id, chunk_id FROM {self.p}mentions")]
+            rels = self.db.execute(f"SELECT src,dst,relation,chunk_id FROM {self.p}relations").fetchall()
         return ents, ments, rels

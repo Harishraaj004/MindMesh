@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -15,12 +15,16 @@ from . import config, ingest, reasoning
 from .evaluate import run_eval
 from .models import embedder, llm
 from .retrieval import Index
+from .sessions import sessions
 from .storage import Store
 from .visuals import explain_visually
 
 config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-store = Store(config.DATABASE_URL, schema=config.DB_SCHEMA or None)
-index = Index(store)
+if config.SESSIONS:   # hosted: every page load gets a private, throwaway workspace (see sessions.py)
+    store = index = None
+else:                 # local: one persistent workspace
+    store = Store(config.DATABASE_URL, schema=config.DB_SCHEMA or None)
+    index = Index(store)
 app = FastAPI(title="MindMesh")
 
 # Load the embedding model in the background so the first upload doesn't pay the ~15 s load.
@@ -56,6 +60,25 @@ def _public_host(url):
     return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
 
 
+def workspace(request: Request):
+    """(store, index) for the caller. Hosted mode: keyed by the X-Session header (or ?sid= for <img> tags)."""
+    if not config.SESSIONS:
+        return store, index
+    sid = request.headers.get("x-session") or request.query_params.get("sid") or ""
+    try:
+        return sessions.get(sid)
+    except ValueError:
+        raise HTTPException(400, "Missing or invalid session")
+
+
+@app.post("/api/session/end")
+def end_session(sid: str = ""):
+    """Sent by the page when it is closed or reloaded; deletes that session's data."""
+    if config.SESSIONS:
+        sessions.end(sid)
+    return {"ok": True}
+
+
 class AskReq(BaseModel):
     question: str
     mode: str = "hybrid_graph"
@@ -67,18 +90,21 @@ class LinkReq(BaseModel):
 
 
 @app.get("/api/status")
-def status():
+def status(ws=Depends(workspace)):
+    store, index = ws
     return {"llm": llm.name, "llm_configured": llm.available, "embedder": embedder.name,
             "documents": len(store.list_documents())}
 
 
 @app.get("/api/documents")
-def documents():
+def documents(ws=Depends(workspace)):
+    store, index = ws
     return store.list_documents()
 
 
 @app.post("/api/documents")
-async def upload(files: list[UploadFile] = File(...)):
+async def upload(files: list[UploadFile] = File(...), ws=Depends(workspace)):
+    store, index = ws
     results, errors = [], []
     for f in files:
         try:
@@ -89,7 +115,8 @@ async def upload(files: list[UploadFile] = File(...)):
 
 
 @app.post("/api/links")
-def add_link(req: LinkReq):
+def add_link(req: LinkReq, ws=Depends(workspace)):
+    store, index = ws
     if not req.url.startswith(("http://", "https://")):
         raise HTTPException(400, "URL must start with http:// or https://")
     if config.ON_VERCEL and not _public_host(req.url):
@@ -100,7 +127,7 @@ def add_link(req: LinkReq):
         raise HTTPException(400, str(e))
 
 
-def _remove_document(doc):
+def _remove_document(store, doc):
     if doc["path"]:
         Path(doc["path"]).unlink(missing_ok=True)
     if (doc.get("meta") or {}).get("annotated"):
@@ -109,16 +136,18 @@ def _remove_document(doc):
 
 
 @app.delete("/api/documents/{doc_id}")
-def delete(doc_id: str):
+def delete(doc_id: str, ws=Depends(workspace)):
+    store, index = ws
     doc = store.get_document(doc_id)
     if not doc:
         raise HTTPException(404)
-    _remove_document(doc)
+    _remove_document(store, doc)
     return {"ok": True}
 
 
 @app.post("/api/documents/{doc_id}/reindex")
-def reindex(doc_id: str):
+def reindex(doc_id: str, ws=Depends(workspace)):
+    store, index = ws
     """Re-process a stored file with the current settings (new model, new extractor...). The old copy is only
     removed after the new one was indexed successfully."""
     doc = store.get_document(doc_id)
@@ -130,12 +159,13 @@ def reindex(doc_id: str):
         res = ingest.ingest_bytes(store, doc["name"], Path(doc["path"]).read_bytes(), source=doc.get("source") or "")
     except Exception as e:
         raise HTTPException(400, str(e))
-    _remove_document(doc)
+    _remove_document(store, doc)
     return res
 
 
 @app.get("/api/documents/{doc_id}/annotated")
-def annotated(doc_id: str):
+def annotated(doc_id: str, ws=Depends(workspace)):
+    store, index = ws
     doc = store.get_document(doc_id)
     p = ((doc or {}).get("meta") or {}).get("annotated")
     if not p or not Path(p).exists():
@@ -144,7 +174,8 @@ def annotated(doc_id: str):
 
 
 @app.get("/api/documents/{doc_id}/file")
-def raw_file(doc_id: str):
+def raw_file(doc_id: str, ws=Depends(workspace)):
+    store, index = ws
     doc = store.get_document(doc_id)
     if not doc or not doc["path"] or not Path(doc["path"]).exists():
         raise HTTPException(404)
@@ -152,13 +183,15 @@ def raw_file(doc_id: str):
 
 
 @app.get("/api/search")
-def search(q: str, mode: str = "hybrid_graph", k: int = 8):
+def search(q: str, mode: str = "hybrid_graph", k: int = 8, ws=Depends(workspace)):
+    store, index = ws
     hits, trace = index.search(q, k=k, mode=mode)
     return {"hits": hits, "trace": trace}
 
 
 @app.post("/api/ask")
-def ask(req: AskReq):
+def ask(req: AskReq, ws=Depends(workspace)):
+    store, index = ws
     if req.mode not in ("vector", "bm25", "hybrid", "hybrid_graph"):
         raise HTTPException(400, "bad mode")
     res = reasoning.ask(index, req.question, mode=req.mode)
@@ -168,7 +201,8 @@ def ask(req: AskReq):
 
 
 @app.post("/api/samples")
-def load_samples():
+def load_samples(ws=Depends(workspace)):
+    store, index = ws
     have = {d["name"] for d in store.list_documents()}
     loaded = 0
     for p in sorted((config.ROOT / "data" / "samples").glob("*")):
@@ -179,7 +213,8 @@ def load_samples():
 
 
 @app.get("/api/graph")
-def graph():
+def graph(ws=Depends(workspace)):
+    store, index = ws
     index.refresh()
     g = index.graph.export()
     g["bridges"] = index.graph.cross_doc_bridges()
@@ -187,7 +222,8 @@ def graph():
 
 
 @app.post("/api/eval")
-def evaluate(modes: list[str] | None = None):
+def evaluate(modes: list[str] | None = None, ws=Depends(workspace)):
+    store, index = ws
     index.refresh()
     return run_eval(index, modes)
 
