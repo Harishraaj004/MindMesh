@@ -135,6 +135,41 @@ class HashingEmbeddings(Embeddings):
         return self.embed_documents([text])[0]
 
 
+class HostedEmbeddings(Embeddings):
+    """OpenAI-compatible /embeddings endpoint, truncated to DIM dims (text-embedding-3-* support `dimensions`)."""
+
+    def embed_documents(self, texts):
+        out = []
+        for i in range(0, len(texts), 64):
+            r = httpx.post(config.EMBED_BASE_URL + "/embeddings", timeout=60,
+                           headers={"Authorization": f"Bearer {config.EMBED_API_KEY}"},
+                           json={"model": config.EMBED_MODEL_NAME, "input": list(texts[i:i + 64]), "dimensions": DIM})
+            r.raise_for_status()
+            out += [d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"])]
+        return out
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+
+class HFInferenceEmbeddings(Embeddings):
+    """sentence-transformers model served by the Hugging Face Inference API (no local torch needed)."""
+
+    def embed_documents(self, texts):
+        url = ("https://router.huggingface.co/hf-inference/models/"
+               f"{config.EMBED_MODEL_NAME}/pipeline/feature-extraction")
+        out = []
+        for i in range(0, len(texts), 32):
+            r = httpx.post(url, timeout=90, headers={"Authorization": f"Bearer {config.HF_TOKEN}"},
+                           json={"inputs": list(texts[i:i + 32]), "options": {"wait_for_model": True}})
+            r.raise_for_status()
+            out += r.json()
+        return out
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+
 class Embedder:
     """numpy-friendly wrapper over a LangChain Embeddings object.
 
@@ -144,13 +179,17 @@ class Embedder:
 
     def __init__(self):
         self._lc = None
-        self.name = "hashing-384" if config.EMBEDDER == "hashing" else config.EMBED_MODEL_NAME
+        self.name = "hashing-384" if config.EMBEDDER == "hashing" else config.EMBED_MODEL_NAME  # openai/minilm: model id
 
     @property
     def lc(self):
         if self._lc is None:
             if config.EMBEDDER == "hashing":
                 self._lc = HashingEmbeddings()
+            elif config.EMBEDDER == "hf":
+                self._lc = HFInferenceEmbeddings()
+            elif config.EMBEDDER == "openai":
+                self._lc = HostedEmbeddings()
             else:
                 from langchain_huggingface import HuggingFaceEmbeddings
                 self._lc = HuggingFaceEmbeddings(model_name=config.EMBED_MODEL_NAME,

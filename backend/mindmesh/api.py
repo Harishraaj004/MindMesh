@@ -1,8 +1,13 @@
+import base64
+import hmac
+import ipaddress
+import socket
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -19,7 +24,36 @@ index = Index(store)
 app = FastAPI(title="MindMesh")
 
 # Load the embedding model in the background so the first upload doesn't pay the ~15 s load.
-threading.Thread(target=lambda: embedder.embed(["warm up"]), daemon=True).start()
+if not config.ON_VERCEL and config.EMBEDDER == "minilm":
+    threading.Thread(target=lambda: embedder.embed(["warm up"]), daemon=True).start()
+
+
+@app.middleware("http")
+async def password_gate(request: Request, call_next):
+    """HTTP Basic gate over the whole app (any username). The browser caches the credentials, so fetch()
+    and <img> requests from the UI are covered too."""
+    if config.ACCESS_PASSWORD:
+        ok = False
+        h = request.headers.get("authorization", "")
+        if h.lower().startswith("basic "):
+            try:
+                _, _, pw = base64.b64decode(h[6:]).decode().partition(":")
+                ok = hmac.compare_digest(pw.encode(), config.ACCESS_PASSWORD.encode())
+            except Exception:
+                ok = False
+        if not ok:
+            return Response("Authentication required", 401, headers={"WWW-Authenticate": 'Basic realm="MindMesh"'})
+    return await call_next(request)
+
+
+def _public_host(url):
+    """Reject URLs that resolve to loopback/private/link-local addresses (basic SSRF guard)."""
+    host = urlparse(url).hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
 
 
 class AskReq(BaseModel):
@@ -58,6 +92,8 @@ async def upload(files: list[UploadFile] = File(...)):
 def add_link(req: LinkReq):
     if not req.url.startswith(("http://", "https://")):
         raise HTTPException(400, "URL must start with http:// or https://")
+    if config.ON_VERCEL and not _public_host(req.url):
+        raise HTTPException(400, "URL must point to a public host")
     try:
         return ingest.ingest_url(store, req.url)
     except Exception as e:

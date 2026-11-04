@@ -13,7 +13,11 @@ if _env.exists():
         if "=" in _line:
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip().strip('"\''))
-DATA_DIR = Path(os.getenv("MINDMESH_DATA_DIR", ROOT / "data" / "store"))
+ON_VERCEL = bool(os.getenv("VERCEL"))
+# Vercel's filesystem is read-only except /tmp (ephemeral), so uploads live there when hosted.
+DATA_DIR = Path(os.getenv("MINDMESH_DATA_DIR") or ("/tmp/mindmesh" if ON_VERCEL else ROOT / "data" / "store"))
+# Shared password for the whole app (HTTP Basic, any username). Blank = no gate (local use only).
+ACCESS_PASSWORD = os.getenv("MINDMESH_ACCESS_PASSWORD", "")
 UPLOAD_DIR = DATA_DIR / "uploads"
 FRONTEND_DIR = ROOT / "frontend"
 
@@ -36,7 +40,13 @@ FAST_EFFORT = os.getenv("MINDMESH_FAST_EFFORT") or "minimal"
 
 # Embeddings: local sentence-transformers model (384 dims). MINDMESH_EMBEDDER=hashing gives an offline lexical fallback.
 EMBEDDER = os.getenv("MINDMESH_EMBEDDER", "minilm").lower()
-EMBED_MODEL_NAME = os.getenv("MINDMESH_EMBED_MODEL") or "sentence-transformers/all-MiniLM-L6-v2"
+#   openai = any OpenAI-compatible /embeddings endpoint (hosted; used on Vercel where torch does not fit).
+#   hf = the same sentence-transformers model, run on Hugging Face's hosted Inference API (needs HF_TOKEN).
+EMBED_MODEL_NAME = os.getenv("MINDMESH_EMBED_MODEL") or (
+    "text-embedding-3-small" if EMBEDDER == "openai" else "sentence-transformers/all-MiniLM-L6-v2")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("MINDMESH_HF_TOKEN", "")
+EMBED_BASE_URL = (os.getenv("MINDMESH_EMBED_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+EMBED_API_KEY = os.getenv("MINDMESH_EMBED_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 
 # PostgreSQL with the pgvector extension. The database is created on first start if it does not exist.
 DATABASE_URL = os.getenv("MINDMESH_DATABASE_URL", "")
